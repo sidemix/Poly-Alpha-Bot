@@ -1,9 +1,8 @@
 """
 Base class for trading strategies used by the Polymarket scanner.
 
-Right now this is intentionally very minimal — it just gives BTCIntraday
-(and any future strategies) a common parent type and a few helper hooks
-the scanner *might* call.
+This is intentionally minimal — it just gives BTCIntraday (and any future
+strategies) a common parent type and a few helper hooks the scanner can call.
 """
 
 from __future__ import annotations
