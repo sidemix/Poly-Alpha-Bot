@@ -24,8 +24,9 @@ class BTCUpDownStrategy:
         self.cfg = config
 
     def is_btc_up_down_market(self, market: Market) -> bool:
-        q = market.question.lower()
-        return "bitcoin" in q and ("up or down" in q or "up/down" in q or "above" in q or "below" in q)
+       q = market.question.lower()
+       return "bitcoin" in q and ("up or down" in q or "up/down" in q or "above" in q or "below" in q)
+
 
     def _time_to_expiry_hours(self, end_time: datetime) -> float:
         now = datetime.now(timezone.utc)
