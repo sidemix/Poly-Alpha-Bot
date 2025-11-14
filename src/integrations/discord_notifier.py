@@ -1,40 +1,30 @@
 import requests
-import math
 
 class DiscordNotifier:
     def __init__(self, webhook_url: str):
         self.url = webhook_url
 
     # ──────────────────────────────────────────────────────────────
-    # Safe send: splits messages into Discord-safe chunks (<2000 chars)
+    # Safe send: splits long messages to avoid Discord 2k limit
     # ──────────────────────────────────────────────────────────────
     def send(self, message: str):
         if not self.url:
             print("[DISCORD] Webhook not set. Message:\n", message)
             return
 
-        chunks = self._split_message(message)
-
-        for chunk in chunks:
-            resp = requests.post(
-                self.url,
-                json={"content": chunk},
-                timeout=5
-            )
-
+        for chunk in self._split_message(message):
+            resp = requests.post(self.url, json={"content": chunk}, timeout=5)
             if resp.status_code >= 300:
                 print(f"[DISCORD] Error {resp.status_code}: {resp.text}")
 
-    # ──────────────────────────────────────────────────────────────
     def _split_message(self, text: str) -> list[str]:
-        max_len = 1900  # leave buffer below Discord's 2000 limit
+        max_len = 1900
         if len(text) <= max_len:
             return [text]
-
-        return [text[i:i+max_len] for i in range(0, len(text), max_len)]
+        return [text[i:i + max_len] for i in range(0, len(text), max_len)]
 
     # ──────────────────────────────────────────────────────────────
-    # Format BTC opportunities as compact 1-liners
+    # Formatters
     # ──────────────────────────────────────────────────────────────
     def format_opportunities(self, opps):
         if not opps:
@@ -45,15 +35,25 @@ class DiscordNotifier:
         macro = []
 
         for o in opps:
+            # enrich line with strike/expiry if available
+            strike_txt, expiry_txt = "", ""
+            market_prob = getattr(o, "yes_price", 0.0)
+            if getattr(o, "meta", None):
+                if "strike" in o.meta and o.meta["strike"]:
+                    strike_txt = f" | K=${int(o.meta['strike']):,}"
+                if "days_to_expiry" in o.meta and o.meta["days_to_expiry"] is not None:
+                    expiry_txt = f" | T={float(o.meta['days_to_expiry']):.1f}d"
+                market_prob = o.meta.get("market_prob", o.yes_price)
+
             line = (
-                f"• **{o.type.upper()}** — "
-                f"{o.market.question[:70]}... "
-                f"→ `{o.side}` @ {o.yes_price*100:.1f}¢ "
-                f"(edge: {o.edge_bp/100:.2f}%)\n"
-                f"🌐 {o.market.url}\n"
-
+                f"• **{o.type.upper()}** — {o.market.question[:70]}...\n"
+                f"  → `{o.side}` @ {o.yes_price * 100:.1f}¢"
+                f" | mkt={market_prob * 100:.2f}%"
+                f" | fair={o.fair_prob * 100:.2f}%"
+                f" | edge={o.edge_bp / 100:.2f}%"
+                f"{strike_txt}{expiry_txt}\n"
+                f"  🌐 {o.market.url}\n"
             )
-
 
             if o.type == "intraday":
                 intraday.append(line)
@@ -63,13 +63,10 @@ class DiscordNotifier:
                 macro.append(line)
 
         msg = "**BTC Mispriced Opportunities**\n\n"
-
         if intraday:
             msg += "__**Intraday Markets**__\n" + "".join(intraday) + "\n"
-
         if targets:
             msg += "__**Price Targets**__\n" + "".join(targets) + "\n"
-
         if macro:
             msg += "__**Macro / Other BTC**__\n" + "".join(macro) + "\n"
 
