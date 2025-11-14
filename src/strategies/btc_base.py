@@ -1,9 +1,11 @@
-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List
+
 from ..integrations.polymarket_client import Market
+
 
 @dataclass
 class ScoredOpportunity:
