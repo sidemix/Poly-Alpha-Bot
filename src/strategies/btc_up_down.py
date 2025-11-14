@@ -19,6 +19,14 @@ class ScoredOpportunity:
 
 
 class BTCUpDownStrategy:
+    """
+    Strategy for intraday BTC 'up or down' style markets, e.g.:
+      - /event/btc-updown-15m-...
+      - /event/btc-updown-4h-...
+      - /event/bitcoin-up-or-down-november-14-8am-et
+      - 'Bitcoin up or down on November 14?'
+    """
+
     def __init__(self, config: AppConfig):
         self.cfg = config
 
@@ -26,25 +34,43 @@ class BTCUpDownStrategy:
         now = datetime.now(timezone.utc)
         return max((end_time - now).total_seconds() / 86400.0, 0.0)
 
-    def is_btc_market(self, market: Market) -> bool:
+    def is_intraday_btc_updown(self, market: Market) -> bool:
+        """
+        Use BOTH question text and URL patterns to detect intraday BTC up/down markets.
+        """
         q = market.question.lower()
-        return "bitcoin" in q or "btc" in q
+        u = market.url.lower()
 
-    def is_updown_like(self, market: Market) -> bool:
-        """
-        Loose classifier for 'up/down' style questions.
-        We'll refine this after we see real titles in logs.
-        """
-        q = market.question.lower()
-        keywords = ["up or down", "up/down", "up", "down", "above", "below", "over", "under"]
-        return any(k in q for k in keywords)
+        # BTC / Bitcoin check
+        if "bitcoin" not in q and "btc" not in q and "btc-" not in u:
+            return False
+
+        # Up/down patterns from the links you sent
+        patterns = [
+            "btc-updown",           # /event/btc-updown-15m-...
+            "btc updown",
+            "btc up/down",
+            "bitcoin up or down",   # /event/bitcoin-up-or-down-...
+            "bitcoin-up-or-down",
+            "up or down",           # fallback in case 'bitcoin' is only in URL
+        ]
+
+        return any(p in q or p in u for p in patterns)
 
     def estimate_fair_prob(self, market: Market) -> float:
-        # Placeholder: flat 0.5 for now
+        """
+        Placeholder fair probability model.
+        Later: plug in live BTC price + time window + vol.
+        """
         return 0.5
 
     def score_market(self, market: Market) -> ScoredOpportunity | None:
-        if not self.is_btc_market(market):
+        if not self.is_intraday_btc_updown(market):
+            return None
+
+        # Only keep markets within configured horizon
+        days = self._days_to_expiry(market.end_time)
+        if days > self.cfg.scan.max_resolution_days:
             return None
 
         if len(market.outcomes) < 2:
@@ -70,39 +96,24 @@ class BTCUpDownStrategy:
         )
 
     def find_opportunities(self, markets: List[Market]) -> List[ScoredOpportunity]:
-        btc_markets = []
+        btc_updown_markets = 0
         opps: list[ScoredOpportunity] = []
 
         for m in markets:
-            if self.is_btc_market(m):
-                btc_markets.append(m)
+            if self.is_intraday_btc_updown(m):
+                btc_updown_markets += 1
+                scored = self.score_market(m)
+                if not scored:
+                    continue
 
-        # 🔍 DEBUG: print a few BTC markets so we can see how they’re written
-        print(f"[BTC_DEBUG] Found {len(btc_markets)} BTC markets total")
-        for m in btc_markets[:10]:
-            days = self._days_to_expiry(m.end_time)
-            print(f"[BTC_DEBUG] '{m.question}' — days_to_expiry={days:.2f}")
+                if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
+                    continue
 
-        # Now, only treat 'up/down-like' + within max_resolution_days as candidates
-        for m in btc_markets:
-            days = self._days_to_expiry(m.end_time)
-            if days > self.cfg.scan.max_resolution_days:
-                continue
-            if not self.is_updown_like(m):
-                continue
-
-            scored = self.score_market(m)
-            if not scored:
-                continue
-
-            if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
-                continue
-
-            opps.append(scored)
+                opps.append(scored)
 
         print(
-            f"[BTC_STRAT] btc_markets={len(btc_markets)}, "
-            f"updown_short_horizon={len(opps)}"
+            f"[BTC_STRAT] intraday_btc_updown_markets={btc_updown_markets}, "
+            f"opps={len(opps)}"
         )
 
         opps.sort(key=lambda o: abs(o.edge_bp), reverse=True)
