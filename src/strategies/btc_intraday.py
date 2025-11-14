@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 from .btc_base import BTCBase, ScoredOpportunity
 from ..utils.config import AppConfig
 from ..integrations.polymarket_client import Market
+
 
 class BTCIntraday(BTCBase):
     def __init__(self, cfg: AppConfig):
