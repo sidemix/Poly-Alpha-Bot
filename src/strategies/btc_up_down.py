@@ -22,38 +22,29 @@ class BTCUpDownStrategy:
     def __init__(self, config: AppConfig):
         self.cfg = config
 
-    def is_btc_up_down_market(self, market: Market) -> bool:
-        """
-        Treat as 'up/down' style if:
-        - question mentions bitcoin/BTC
-        - AND it talks about up/down/above/below/over/under
-        """
-        q = market.question.lower()
-
-        if "bitcoin" not in q and "btc" not in q:
-            return False
-
-        keywords = ["up or down", "up/down", "up", "down", "above", "below", "over", "under"]
-        return any(k in q for k in keywords)
-
-    def _time_to_expiry_hours(self, end_time: datetime) -> float:
-        now = datetime.now(timezone.utc)
-        return max((end_time - now).total_seconds() / 3600.0, 0.0)
-
     def _days_to_expiry(self, end_time: datetime) -> float:
         now = datetime.now(timezone.utc)
         return max((end_time - now).total_seconds() / 86400.0, 0.0)
 
+    def is_btc_market(self, market: Market) -> bool:
+        q = market.question.lower()
+        return "bitcoin" in q or "btc" in q
+
+    def is_updown_like(self, market: Market) -> bool:
+        """
+        Loose classifier for 'up/down' style questions.
+        We'll refine this after we see real titles in logs.
+        """
+        q = market.question.lower()
+        keywords = ["up or down", "up/down", "up", "down", "above", "below", "over", "under"]
+        return any(k in q for k in keywords)
+
     def estimate_fair_prob(self, market: Market) -> float:
-        # placeholder, we’ll plug in real BTC logic later
+        # Placeholder: flat 0.5 for now
         return 0.5
 
     def score_market(self, market: Market) -> ScoredOpportunity | None:
-        if not self.is_btc_up_down_market(market):
-            return None
-
-        # enforce short horizon here too
-        if self._days_to_expiry(market.end_time) > self.cfg.scan.max_resolution_days:
+        if not self.is_btc_market(market):
             return None
 
         if len(market.outcomes) < 2:
@@ -79,24 +70,39 @@ class BTCUpDownStrategy:
         )
 
     def find_opportunities(self, markets: List[Market]) -> List[ScoredOpportunity]:
-        btc_markets = 0
+        btc_markets = []
         opps: list[ScoredOpportunity] = []
 
         for m in markets:
-            if self.is_btc_up_down_market(m):
-                btc_markets += 1
-                scored = self.score_market(m)
-                if not scored:
-                    continue
+            if self.is_btc_market(m):
+                btc_markets.append(m)
 
-                if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
-                    continue
+        # 🔍 DEBUG: print a few BTC markets so we can see how they’re written
+        print(f"[BTC_DEBUG] Found {len(btc_markets)} BTC markets total")
+        for m in btc_markets[:10]:
+            days = self._days_to_expiry(m.end_time)
+            print(f"[BTC_DEBUG] '{m.question}' — days_to_expiry={days:.2f}")
 
-                opps.append(scored)
+        # Now, only treat 'up/down-like' + within max_resolution_days as candidates
+        for m in btc_markets:
+            days = self._days_to_expiry(m.end_time)
+            if days > self.cfg.scan.max_resolution_days:
+                continue
+            if not self.is_updown_like(m):
+                continue
+
+            scored = self.score_market(m)
+            if not scored:
+                continue
+
+            if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
+                continue
+
+            opps.append(scored)
 
         print(
-            f"[BTC_STRAT] saw {btc_markets} BTC up/down-like markets, "
-            f"{len(opps)} passed time + edge filters"
+            f"[BTC_STRAT] btc_markets={len(btc_markets)}, "
+            f"updown_short_horizon={len(opps)}"
         )
 
         opps.sort(key=lambda o: abs(o.edge_bp), reverse=True)
