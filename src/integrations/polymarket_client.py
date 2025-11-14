@@ -1,10 +1,11 @@
 # src/integrations/polymarket_client.py
 from __future__ import annotations
 
-import requests
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, List
+import requests
 
 
 POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
@@ -13,7 +14,7 @@ POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 @dataclass
 class Outcome:
     name: str
-    price: float
+    price: float  # 0–1 probability
 
 
 @dataclass
@@ -22,7 +23,7 @@ class Market:
     question: str
     url: str
     end_time: datetime
-    outcomes: list[Outcome]
+    outcomes: List[Outcome]
 
 
 class PolymarketClient:
@@ -30,50 +31,77 @@ class PolymarketClient:
         self.base_url = base_url
         self.timeout = timeout
 
+    def _parse_outcomes(self, raw: dict[str, Any]) -> List[Outcome]:
+        """
+        outcomes / outcomePrices often come back as JSON-encoded strings.
+        We:
+          - parse both
+          - pair names + prices by index
+          - fall back to generic names if needed
+        """
+        outcomes_field = raw.get("outcomes")
+        prices_field = raw.get("outcomePrices")
+
+        def ensure_list(value):
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    # some responses use '["YES","NO"]' style
+                    return parsed
+                except Exception:
+                    # if it's a comma-separated string, last resort
+                    return [v.strip() for v in value.split(",")]
+            return []
+
+        names = ensure_list(outcomes_field)
+        prices = ensure_list(prices_field)
+
+        outcomes: list[Outcome] = []
+        for i, p in enumerate(prices):
+            try:
+                price = float(p)
+            except (TypeError, ValueError):
+                continue
+            name = names[i] if i < len(names) else f"Outcome {i}"
+            outcomes.append(Outcome(name=name, price=price))
+
+        return outcomes
+
     def _parse_market(self, raw: dict[str, Any]) -> Market | None:
-        # NOTE: you will need to confirm these keys match actual API response
         question = raw.get("question") or raw.get("title")
-        if not question or "bitcoin" not in question.lower():
+        if not question:
             return None
 
         market_id = str(raw.get("id") or raw.get("_id") or "")
         if not market_id:
             return None
 
-        # resolution / end date
+        # end date
         end_ts = raw.get("endDate") or raw.get("closesAt") or raw.get("end_time")
         if not end_ts:
             return None
-
-        # Convert ISO string to datetime
-        end_time = datetime.fromisoformat(end_ts.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-        # outcomes / prices
-        outcomes_raw = raw.get("outcomes") or raw.get("outcomePrices") or []
-        outcomes: list[Outcome] = []
-
-        # outcomes_raw format can vary; here's a generic attempt
-        if isinstance(outcomes_raw, list):
-            for o in outcomes_raw:
-                if isinstance(o, dict):
-                    name = o.get("name") or o.get("outcome") or ""
-                    price = o.get("price") or o.get("yesPrice") or o.get("probability")
-                else:
-                    continue
-
-                if price is None:
-                    continue
-                outcomes.append(Outcome(name=name, price=float(price)))
-        else:
-            # unknown structure, skip
+        try:
+            end_time = datetime.fromisoformat(end_ts.replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+        except Exception:
             return None
 
+        outcomes = self._parse_outcomes(raw)
         if len(outcomes) < 2:
             return None
 
-        url = raw.get("slug") or raw.get("url") or ""
-        if url and not url.startswith("http"):
-            url = f"https://polymarket.com/event/{url}"
+        slug = raw.get("slug") or ""
+        url = raw.get("url") or ""
+        if not url:
+            if slug:
+                url = f"https://polymarket.com/event/{slug}"
+            else:
+                url = "https://polymarket.com/"
 
         return Market(
             id=market_id,
@@ -84,14 +112,23 @@ class PolymarketClient:
         )
 
     def fetch_open_markets(self, limit: int = 500) -> list[Market]:
-        params = {"closed": "false", "limit": limit}
+        """
+        Fetch active/open markets from Gamma.
+        """
+        params = {
+            "closed": "false",
+            "limit": limit,
+            # "active": "true",  # can be added if needed
+        }
         resp = requests.get(self.base_url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict) and "markets" in data:
-            raw_markets = data["markets"]
-        elif isinstance(data, list):
+
+        # The API returns a raw list, not wrapped
+        if isinstance(data, list):
             raw_markets = data
+        elif isinstance(data, dict) and "markets" in data:
+            raw_markets = data["markets"]
         else:
             raw_markets = []
 
@@ -100,5 +137,6 @@ class PolymarketClient:
             m = self._parse_market(raw)
             if m:
                 markets.append(m)
-        return markets
 
+        print(f"[POLY] fetched {len(raw_markets)} raw markets, parsed {len(markets)} usable markets")
+        return markets
