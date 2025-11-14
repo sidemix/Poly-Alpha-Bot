@@ -48,9 +48,12 @@ class DiscordNotifier:
             line = (
                 f"• **{o.type.upper()}** — "
                 f"{o.market.question[:70]}... "
-                f"→ `{o.side}` @ {o.yes_price:.2f} "
+                f"→ `{o.side}` @ {o.yes_price*100:.1f}¢ "
                 f"(edge: {o.edge_bp/100:.2f}%)\n"
+                f"🌐 {o.market.url}\n"
+
             )
+
 
             if o.type == "intraday":
                 intraday.append(line)
