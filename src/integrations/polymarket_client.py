@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 import requests
 
 POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
@@ -19,9 +19,15 @@ class Outcome:
 class Market:
     id: str
     question: str
-    url: str
+    url: str                  # chosen, working link (event+tid if available, else /market/<id>)
     end_time: datetime
     outcomes: List[Outcome]
+
+    # Optional metadata (useful for debugging or future UI)
+    market_url: str           # always /market/<id> (stable)
+    event_url: Optional[str]  # event slug + tid when available
+    event_slug: Optional[str]
+    token_id: Optional[str]
 
 
 class PolymarketClient:
@@ -62,7 +68,7 @@ class PolymarketClient:
             outcomes.append(Outcome(name=name, price=price))
         return outcomes
 
-    def _parse_market(self, raw: dict[str, Any]) -> Market | None:
+    def _parse_market(self, raw: dict[str, Any]) -> Optional[Market]:
         # id
         market_id = str(raw.get("id") or raw.get("_id") or "").strip()
         if not market_id:
@@ -87,15 +93,45 @@ class PolymarketClient:
         if len(outcomes) < 2:
             return None
 
-        # 🚨 Always use stable canonical link
-        url = f"https://polymarket.com/market/{market_id}"
+        # Optional event metadata that enables event+tid linking
+        # The Gamma response fields vary; we try common aliases.
+        event_slug = (
+            raw.get("eventSlug")
+            or raw.get("event_slug")
+            or raw.get("groupSlug")
+            or raw.get("slug")
+        )
+        token_id = (
+            raw.get("tokenId")
+            or raw.get("token_id")
+            or raw.get("conditionId")
+            or raw.get("tid")
+        )
+        if event_slug:
+            event_slug = str(event_slug).strip()
+        if token_id:
+            token_id = str(token_id).strip()
+
+        # Canonical market link (always valid)
+        market_url = f"https://polymarket.com/market/{market_id}"
+
+        # Prefer event+tid when both available (best UX, matches your working example)
+        event_url = None
+        if event_slug and token_id:
+            event_url = f"https://polymarket.com/event/{event_slug}?tid={token_id}"
+
+        chosen_url = event_url or market_url
 
         return Market(
             id=market_id,
             question=question,
-            url=url,
+            url=chosen_url,
             end_time=end_time,
             outcomes=outcomes,
+            market_url=market_url,
+            event_url=event_url,
+            event_slug=event_slug,
+            token_id=token_id,
         )
 
     # --- public ---------------------------------------------------------------
