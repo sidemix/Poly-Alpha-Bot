@@ -5,30 +5,31 @@ from src.utils.config import load_config
 from src.integrations.polymarket_client import PolymarketClient
 from src.integrations.discord_notifier import DiscordNotifier
 from src.core.scanner import Scanner
+from src.core.risk_engine import RiskEngine
 
 
 def main():
     print("[BOOT] Polymarket alpha bot (Full BTC Scanner) started")
 
     # ───────────────────────────────────────────────────────────
-    # Load config
+    # Load config (matches your existing AppConfig)
     # ───────────────────────────────────────────────────────────
     cfg = load_config()
 
-    # Polymarket API client
-    client = PolymarketClient(
-        base_url=cfg.polymarket.base_url,
-        timeout=cfg.polymarket.timeout
-    )
+    # Polymarket API client (use defaults from polymarket_client.py)
+    client = PolymarketClient()
 
-    # BTC Scanner (intraday + price targets + macro)
+    # Scanner (BTC: intraday + targets + macro, depending on strategies)
     scanner = Scanner(cfg, client)
 
-    # Discord notifier
-    notifier = DiscordNotifier(cfg.discord.webhook)
+    # Discord notifier (your config has `discord.webhook_url`)
+    notifier = DiscordNotifier(cfg.discord.webhook_url)
 
-    # Scan every N seconds (from config.yaml)
-    SCAN_INTERVAL = cfg.scan.interval_seconds
+    # Risk engine (for position sizing + daily loss checks)
+    risk = RiskEngine(cfg)
+
+    # Scan interval (from your existing ScanConfig)
+    SCAN_INTERVAL = cfg.scan.scan_interval_sec
 
     # ───────────────────────────────────────────────────────────
     # Main Loop
@@ -37,23 +38,29 @@ def main():
         try:
             print("[SCAN] Running BTC mispricing scan…")
 
-            # Raw scan (returns ALL BTC opportunities)
+            # Run the scanner – returns a list of ScoredOpportunity
             opps = scanner.run_scan()
+            print(f"[SCAN] Scanner returned {len(opps)} BTC opportunities")
 
-            print(f"[SCAN] Found {len(opps)} BTC markets")
+            # Limit how many we send to Discord (top N by edge)
+            max_opps = 7
+            top = opps[:max_opps]
 
-            # Trim to top N results for Discord
-            top = opps[:cfg.scan.max_opportunities]
-
-            # Format and send to Discord
+            # Build and send Discord message (auto-splits inside notifier)
             msg = notifier.format_opportunities(top)
             notifier.send(msg)
 
-            # Print local dry-run trades for future auto-exec
+            # Dry-run trade decisions using RiskEngine
             for o in top:
+                decision = risk.should_trade()
+                if not decision.allowed:
+                    print(f"[TRADE] Skipping trade on '{o.market.question}': {decision.reason}")
+                    continue
+
+                size = risk.compute_position_size()
                 print(
                     f"[TRADE-DRY-RUN] Would trade side={o.side}, "
-                    f"size={cfg.trade.default_size}, "
+                    f"size=${size:.2f}, "
                     f"market='{o.market.question}', "
                     f"edge={o.edge_bp/100:.2f}%"
                 )
@@ -63,8 +70,11 @@ def main():
             print(e)
             traceback.print_exc()
 
-            # Send error to Discord
-            notifier.send(f"**Polymarket BTC Scanner Error:**\n```\n{e}\n```")
+            # Best-effort notify Discord about the error
+            try:
+                notifier.send(f"**Polymarket BTC Scanner Error:**\n```\n{e}\n```")
+            except Exception as inner_e:
+                print("[ERROR] Failed to send error to Discord:", inner_e)
 
         # Sleep between scans
         print(f"[SLEEP] Sleeping {SCAN_INTERVAL} seconds…\n")
