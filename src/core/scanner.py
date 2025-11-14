@@ -6,18 +6,23 @@ from ..integrations.price_feed import PriceFeed
 from ..utils.config import AppConfig
 from ..strategies.btc_intraday import BTCIntraday
 from ..strategies.btc_price_target import BTCPriceTargets
-from ..strategies.btc_macro import BTCMacro
+# NOTE: we deliberately drop BTCMacro for now until it has a real model.
 
 class Scanner:
     def __init__(self, cfg: AppConfig, client: PolymarketClient):
         self.cfg = cfg
         self.client = client
         self.feed = PriceFeed()
-        self.strats = [BTCIntraday(cfg), BTCPriceTargets(cfg)]  # drop BTCMacro for now
-
+        self.strats = [
+            BTCIntraday(cfg),
+            BTCPriceTargets(cfg),
+            # BTCMacro(cfg),  # re-enable when macro model is implemented
+        ]
 
     def run_scan(self):
         markets = self.client.fetch_open_markets()
+
+        # Live BTC spot (used by price-target strategy)
         try:
             btc = self.feed.btc_usd()
             print(f"[PRICE] BTC/USD={btc:.2f}")
@@ -30,6 +35,7 @@ class Scanner:
             ql = m.question.lower()
             if ("bitcoin" not in ql) and ("btc" not in ql):
                 continue
+
             for strat in self.strats:
                 scored = strat.score(m, btc)
                 if scored and abs(scored.edge_bp) >= self.cfg.scan.min_edge_bp:
