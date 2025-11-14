@@ -19,13 +19,13 @@ class Outcome:
 class Market:
     id: str
     question: str
-    url: str                  # chosen, working link (event+tid if available, else /market/<id>)
+    url: str                  # CHOSEN link (we will set this to canonical /market/<id>)
     end_time: datetime
     outcomes: List[Outcome]
 
-    # Optional metadata (useful for debugging or future UI)
+    # Optional metadata (debug only; DO NOT USE FOR LINKS)
     market_url: str           # always /market/<id> (stable)
-    event_url: Optional[str]  # event slug + tid when available
+    event_url: Optional[str]  # event slug + tid if present (may 404; debug only)
     event_slug: Optional[str]
     token_id: Optional[str]
 
@@ -93,8 +93,7 @@ class PolymarketClient:
         if len(outcomes) < 2:
             return None
 
-        # Optional event metadata that enables event+tid linking
-        # The Gamma response fields vary; we try common aliases.
+        # Optional event metadata (debug only)
         event_slug = (
             raw.get("eventSlug")
             or raw.get("event_slug")
@@ -112,26 +111,25 @@ class PolymarketClient:
         if token_id:
             token_id = str(token_id).strip()
 
-        # Canonical market link (always valid)
+        # Canonical market link (STABLE)
         market_url = f"https://polymarket.com/market/{market_id}"
 
-        # Prefer event+tid when both available (best UX, matches your working example)
-        event_url = None
-        if event_slug and token_id:
-            event_url = f"https://polymarket.com/event/{event_slug}?tid={token_id}"
+        # Event URL (often fragile; keep only for debugging)
+        event_url = f"https://polymarket.com/event/{event_slug}?tid={token_id}" if (event_slug and token_id) else None
 
-        chosen_url = event_url or market_url
+        # 🚨 CHOOSE CANONICAL URL — never event_url
+        chosen_url = market_url
 
         return Market(
             id=market_id,
             question=question,
-            url=chosen_url,
+            url=chosen_url,         # <— canonical
             end_time=end_time,
             outcomes=outcomes,
-            market_url=market_url,
-            event_url=event_url,
-            event_slug=event_slug,
-            token_id=token_id,
+            market_url=market_url,  # debug
+            event_url=event_url,    # debug
+            event_slug=event_slug,  # debug
+            token_id=token_id,      # debug
         )
 
     # --- public ---------------------------------------------------------------
