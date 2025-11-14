@@ -1,5 +1,6 @@
 import requests
 
+
 class DiscordNotifier:
     def __init__(self, webhook_url: str):
         self.url = webhook_url
@@ -35,15 +36,25 @@ class DiscordNotifier:
         macro = []
 
         for o in opps:
-            # enrich line with strike/expiry if available
+            # strike/expiry metadata if available
             strike_txt, expiry_txt = "", ""
             market_prob = getattr(o, "yes_price", 0.0)
+
             if getattr(o, "meta", None):
                 if "strike" in o.meta and o.meta["strike"]:
-                    strike_txt = f" | K=${int(o.meta['strike']):,}"
+                    try:
+                        strike_txt = f" | K=${int(o.meta['strike']):,}"
+                    except Exception:
+                        pass
                 if "days_to_expiry" in o.meta and o.meta["days_to_expiry"] is not None:
-                    expiry_txt = f" | T={float(o.meta['days_to_expiry']):.1f}d"
+                    try:
+                        expiry_txt = f" | T={float(o.meta['days_to_expiry']):.1f}d"
+                    except Exception:
+                        pass
                 market_prob = o.meta.get("market_prob", o.yes_price)
+
+            # 🚨 Always use canonical market link; fallback if url missing
+            safe_url = getattr(o.market, "url", "") or f"https://polymarket.com/market/{o.market.id}"
 
             line = (
                 f"• **{o.type.upper()}** — {o.market.question[:70]}...\n"
@@ -52,7 +63,7 @@ class DiscordNotifier:
                 f" | fair={o.fair_prob * 100:.2f}%"
                 f" | edge={o.edge_bp / 100:.2f}%"
                 f"{strike_txt}{expiry_txt}\n"
-                f"  🌐 {o.market.url}\n"
+                f"  🌐 {safe_url}\n"
             )
 
             if o.type == "intraday":
