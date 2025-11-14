@@ -5,6 +5,7 @@ from ..utils.config import AppConfig
 from ..integrations.polymarket_client import Market
 
 
+
 class BTCMacro(BTCBase):
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
