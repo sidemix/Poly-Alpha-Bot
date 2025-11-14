@@ -17,17 +17,26 @@ class Outcome:
 
 @dataclass
 class Market:
+    # Core
     id: str
     question: str
-    url: str                  # CHOSEN link (we will set this to canonical /market/<id>)
     end_time: datetime
     outcomes: List[Outcome]
 
-    # Optional metadata (debug only; DO NOT USE FOR LINKS)
-    market_url: str           # always /market/<id> (stable)
-    event_url: Optional[str]  # event slug + tid if present (may 404; debug only)
-    event_slug: Optional[str]
-    token_id: Optional[str]
+    # Possible URL-ish hints directly from API (use when present)
+    api_url: Optional[str] = None
+
+    # Identifiers we can compose into working links
+    event_slug: Optional[str] = None
+    group_slug: Optional[str] = None
+    question_slug: Optional[str] = None
+    generic_slug: Optional[str] = None
+    market_slug: Optional[str] = None
+    token_id: Optional[str] = None         # aka tid
+    condition_id: Optional[str] = None
+
+    # Final resolved link (filled by resolver)
+    url: Optional[str] = None
 
 
 class PolymarketClient:
@@ -38,26 +47,23 @@ class PolymarketClient:
     # --- helpers --------------------------------------------------------------
 
     def _ensure_list(self, value) -> list:
-        """Polymarket sometimes returns JSON strings for outcomes/prices."""
         if value is None:
             return []
         if isinstance(value, list):
             return value
         if isinstance(value, str):
-            # try JSON first
+            # Try to parse JSON first, else comma-split
             try:
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
                     return parsed
             except Exception:
-                # last resort: comma-split
                 return [v.strip() for v in value.split(",") if v.strip()]
         return []
 
     def _parse_outcomes(self, raw: dict[str, Any]) -> List[Outcome]:
         names = self._ensure_list(raw.get("outcomes"))
         prices = self._ensure_list(raw.get("outcomePrices"))
-
         outcomes: list[Outcome] = []
         for i, p in enumerate(prices):
             try:
@@ -68,88 +74,68 @@ class PolymarketClient:
             outcomes.append(Outcome(name=name, price=price))
         return outcomes
 
+    def _gx(self, raw: dict[str, Any], *keys: str) -> Optional[str]:
+        for k in keys:
+            v = raw.get(k)
+            if v is not None:
+                s = str(v).strip()
+                if s:
+                    return s
+        return None
+
     def _parse_market(self, raw: dict[str, Any]) -> Optional[Market]:
-        # id
-        market_id = str(raw.get("id") or raw.get("_id") or "").strip()
-        if not market_id:
+        market_id    = self._gx(raw, "id", "_id")
+        question     = self._gx(raw, "question", "title")
+        end_ts       = self._gx(raw, "endDate", "closesAt", "end_time")
+        if not market_id or not question or not end_ts:
             return None
 
-        # question
-        question = (raw.get("question") or raw.get("title") or "").strip()
-        if not question:
-            return None
-
-        # end time
-        end_ts = raw.get("endDate") or raw.get("closesAt") or raw.get("end_time")
-        if not end_ts:
-            return None
         try:
             end_time = datetime.fromisoformat(end_ts.replace("Z", "+00:00")).astimezone(timezone.utc)
         except Exception:
             return None
 
-        # outcomes
         outcomes = self._parse_outcomes(raw)
         if len(outcomes) < 2:
             return None
 
-        # Optional event metadata (debug only)
-        event_slug = (
-            raw.get("eventSlug")
-            or raw.get("event_slug")
-            or raw.get("groupSlug")
-            or raw.get("slug")
-        )
-        token_id = (
-            raw.get("tokenId")
-            or raw.get("token_id")
-            or raw.get("conditionId")
-            or raw.get("tid")
-        )
-        if event_slug:
-            event_slug = str(event_slug).strip()
-        if token_id:
-            token_id = str(token_id).strip()
+        # URL-ish hints (some feeds include direct 'url' or 'pageUrl')
+        api_url = self._gx(raw, "url", "pageUrl", "pageURL")
 
-        # Canonical market link (STABLE)
-        market_url = f"https://polymarket.com/market/{market_id}"
-
-        # Event URL (often fragile; keep only for debugging)
-        event_url = f"https://polymarket.com/event/{event_slug}?tid={token_id}" if (event_slug and token_id) else None
-
-        # 🚨 CHOOSE CANONICAL URL — never event_url
-        chosen_url = market_url
+        # Slugs/IDs for link building
+        event_slug    = self._gx(raw, "eventSlug", "event_slug", "groupSlug")
+        group_slug    = self._gx(raw, "groupSlug")
+        question_slug = self._gx(raw, "questionSlug", "marketSlug")
+        generic_slug  = self._gx(raw, "slug")
+        market_slug   = self._gx(raw, "marketSlug")
+        token_id      = self._gx(raw, "tokenId", "token_id", "tid")
+        condition_id  = self._gx(raw, "conditionId", "condition_id")
 
         return Market(
             id=market_id,
             question=question,
-            url=chosen_url,         # <— canonical
             end_time=end_time,
             outcomes=outcomes,
-            market_url=market_url,  # debug
-            event_url=event_url,    # debug
-            event_slug=event_slug,  # debug
-            token_id=token_id,      # debug
+            api_url=api_url,
+            event_slug=event_slug,
+            group_slug=group_slug,
+            question_slug=question_slug,
+            generic_slug=generic_slug,
+            market_slug=market_slug,
+            token_id=token_id,
+            condition_id=condition_id,
+            url=None,
         )
 
     # --- public ---------------------------------------------------------------
 
     def fetch_open_markets(self, limit: int = 500) -> list[Market]:
-        params = {
-            "closed": "false",
-            "limit": limit,
-        }
+        params = {"closed": "false", "limit": limit}
         resp = requests.get(self.base_url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
 
-        if isinstance(data, list):
-            raw_markets = data
-        elif isinstance(data, dict) and "markets" in data:
-            raw_markets = data["markets"]
-        else:
-            raw_markets = []
-
+        raw_markets = data if isinstance(data, list) else data.get("markets", [])
         markets: list[Market] = []
         for raw in raw_markets:
             m = self._parse_market(raw)
