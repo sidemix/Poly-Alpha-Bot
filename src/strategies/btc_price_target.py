@@ -1,7 +1,11 @@
 from __future__ import annotations
+
 import re
+
 from .btc_base import BTCBase, ScoredOpportunity
 from ..utils.config import AppConfig
+from ..integrations.polymarket_client import Market
+
 
 class BTCPriceTargets(BTCBase):
     def __init__(self, cfg: AppConfig):
