@@ -53,10 +53,8 @@ class DiscordNotifier:
                         pass
                 market_prob = o.meta.get("market_prob", o.yes_price)
 
-            # Choose a robust URL:
-            # 1) event+tid if present (best UX)
-            # 2) fallback to canonical /market/<id>
-            safe_url = getattr(o.market, "event_url", None) or getattr(o.market, "market_url", None) or getattr(o.market, "url", "")
+            # 🚨 FORCE CANONICAL MARKET LINK ONLY
+            safe_url = f"https://polymarket.com/market/{o.market.id}"
 
             line = (
                 f"• **{o.type.upper()}** — {o.market.question[:70]}...\n"
