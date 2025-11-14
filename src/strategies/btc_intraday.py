@@ -1,58 +1,89 @@
-from __future__ import annotations
+# src/strategies/btc_intraday.py
 
-from .btc_base import BTCBase, ScoredOpportunity
-from ..utils.config import AppConfig
-from ..integrations.polymarket_client import Market
+from dataclasses import dataclass
+from typing import Optional
+from .base import BaseStrategy
 
+def _s(x: Optional[str]) -> str:
+    return x.lower().strip() if isinstance(x, str) else ""
 
-class BTCIntraday(BTCBase):
-    def __init__(self, cfg: AppConfig):
-        self.cfg = cfg
+@dataclass
+class MarketView:
+    id: str
+    url: Optional[str]
+    title: Optional[str]
+    question: Optional[str]
+    group: Optional[str]
+    yes_price: Optional[float]
+    no_price: Optional[float]
+    end_ts: Optional[int]
+    tags: Optional[list]
 
-    def is_intraday(self, market: Market) -> bool:
-        q = market.question.lower()
-        u = market.url.lower()
-        patterns = [
-            "btc-updown",
-            "up or down",
-            "up/down",
-            "up or down on",
-            "up or down today",
-            "8am et",
-            "4h",
-            "15m"
-        ]
-        return self.is_btc_market(market) and any(p in q or p in u for p in patterns)
+class BTCIntraday(BaseStrategy):
+    """
+    Scores Polymarket 'Bitcoin up or down' / intraday price-to-beat style markets.
+    Hardened against None url/title/etc.
+    """
 
-    def fair_prob(self, strike_price: float, current_price: float, hours_left: float):
-        """Plug-in model later. Placeholder = 0.5."""
-        return 0.5
+    INTRADAY_HINTS = (
+        "bitcoin up or down",
+        "btc up or down",
+        "price to beat",
+        "up or down",
+        "intraday",
+        "today",
+        "within 24h",
+        "24h",
+    )
 
-    def score(self, market: Market, current_price: float) -> ScoredOpportunity | None:
+    BTC_HINTS = (
+        "btc", "bitcoin", "xbt"
+    )
+
+    def is_intraday(self, market: MarketView) -> bool:
+        u   = _s(market.url)
+        ttl = _s(market.title) or _s(market.question)
+        grp = _s(market.group)
+
+        text = " ".join([u, ttl, grp]).strip()
+        if not text:
+            return False
+
+        # Must reference BTC/Bitcoin
+        if not any(h in text for h in self.BTC_HINTS):
+            return False
+
+        # Must look like an intraday/short-horizon structure
+        if not any(h in text for h in self.INTRADAY_HINTS):
+            return False
+
+        return True
+
+    def score(self, market: MarketView, btc_spot: float) -> Optional[float]:
+        # Filter to intraday BTC markets only (safe guard)
         if not self.is_intraday(market):
             return None
 
-        days = self._days_to_expiry(market.end_time)
-        if days > self.cfg.scan.max_resolution_days:
+        # Require prices
+        y, n = market.yes_price, market.no_price
+        if y is None and n is None:
             return None
 
-        # outcomes
-        if len(market.outcomes) < 2:
-            return None
+        # Simple asymmetry: look for implied probs 0.10–0.18 on either side
+        # (you can customize your exact mispricing math here)
+        score = 0.0
+        if y is not None:
+            p_yes = y
+            if 0.10 <= p_yes <= 0.18:
+                score += (0.18 - p_yes) * 10
+        if n is not None:
+            p_no = n
+            if 0.10 <= p_no <= 0.18:
+                score += (0.18 - p_no) * 10
 
-        yes = market.outcomes[0].price
-        fair = 0.5  # placeholder
+        # Nudge for recency if end time is soon
+        if market.end_ts:
+            # sooner expiry → larger score
+            score += self._soon_bonus(market.end_ts)
 
-        edge_bp = (fair - yes) * 10000
-        side = "YES" if edge_bp > 0 else "NO"
-
-        return ScoredOpportunity(
-            market=market,
-            edge_bp=edge_bp,
-            side=side,
-            fair_prob=fair,
-            yes_price=yes,
-            no_price=market.outcomes[1].price,
-            type="intraday"
-        )
-
+        return round(score, 4) if score > 0 else None
