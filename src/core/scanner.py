@@ -13,7 +13,8 @@ class Scanner:
         self.cfg = cfg
         self.client = client
         self.feed = PriceFeed()
-        self.strats = [BTCIntraday(cfg), BTCPriceTargets(cfg), BTCMacro(cfg)]
+        self.strats = [BTCIntraday(cfg), BTCPriceTargets(cfg)]  # drop BTCMacro for now
+
 
     def run_scan(self):
         markets = self.client.fetch_open_markets()
