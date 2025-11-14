@@ -19,33 +19,27 @@ class ScoredOpportunity:
 
 
 class BTCUpDownStrategy:
-    """
-    Debug-friendly v1:
-    - Treat ANY market mentioning 'bitcoin' or 'btc' as a candidate
-    - Very simple fair-prob model (flat 0.5 for now)
-    - Logs how many BTC markets it saw and how many passed filters
-    """
-
     def __init__(self, config: AppConfig):
         self.cfg = config
 
+    # 🔒 Now only true "Bitcoin up or down" style questions
     def is_btc_up_down_market(self, market: Market) -> bool:
         q = market.question.lower()
-        # LOOSENED FILTER for now – just see all BTC questions
-        return "bitcoin" in q or "btc" in q
+        return "bitcoin" in q and "up or down" in q
 
     def _time_to_expiry_hours(self, end_time: datetime) -> float:
         now = datetime.now(timezone.utc)
         return max((end_time - now).total_seconds() / 3600.0, 0.0)
 
+    def _days_to_expiry(self, end_time: datetime) -> float:
+        now = datetime.now(timezone.utc)
+        return max((end_time - now).total_seconds() / 86400.0, 0.0)
+
     def estimate_fair_prob(self, market: Market) -> float:
         """
-        Placeholder fair prob model:
-        - Just returns 0.5 for now.
-        - We’ll replace this with BTC price vs strike once we confirm parsing.
+        Placeholder fair prob model, still flat 0.5 for now.
+        We'll plug in live BTC price vs strike later.
         """
-        # You can use time to expiry later if you want:
-        # hours = self._time_to_expiry_hours(market.end_time)
         return 0.5
 
     def score_market(self, market: Market) -> ScoredOpportunity | None:
@@ -58,7 +52,7 @@ class BTCUpDownStrategy:
         yes = market.outcomes[0]
         no = market.outcomes[1]
 
-        yes_p = yes.price         # expect 0–1 from Gamma
+        yes_p = yes.price
         no_p = no.price
 
         fair = self.estimate_fair_prob(market)
@@ -81,19 +75,25 @@ class BTCUpDownStrategy:
         for m in markets:
             if self.is_btc_up_down_market(m):
                 btc_markets += 1
+
+                # ⏱ filter out far-dated markets using MAX_RESOLUTION_DAYS
+                days = self._days_to_expiry(m.end_time)
+                if days > self.cfg.scan.max_resolution_days:
+                    continue
+
             scored = self.score_market(m)
             if not scored:
                 continue
 
-            # For debugging you can even temporarily ignore the edge filter,
-            # or keep it:
             if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
                 continue
 
             opps.append(scored)
 
-        print(f"[BTC_STRAT] saw {btc_markets} BTC-related markets, "
-              f"{len(opps)} passed edge filter")
+        print(
+            f"[BTC_STRAT] saw {btc_markets} BTC up/down markets, "
+            f"{len(opps)} passed time + edge filters"
+        )
 
         opps.sort(key=lambda o: abs(o.edge_bp), reverse=True)
         return opps
