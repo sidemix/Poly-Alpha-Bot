@@ -1,10 +1,10 @@
 import time
 import traceback
 
-from utils.config import load_config
-from integrations.polymarket_client import PolymarketClient
-from integrations.discord_notifier import DiscordNotifier
-from core.scanner import Scanner
+from src.utils.config import load_config
+from src.integrations.polymarket_client import PolymarketClient
+from src.integrations.discord_notifier import DiscordNotifier
+from src.core.scanner import Scanner
 
 
 def main():
@@ -21,13 +21,13 @@ def main():
         timeout=cfg.polymarket.timeout
     )
 
-    # Scanner (BTC full scanner: intraday + targets + macro)
+    # BTC Scanner (intraday + price targets + macro)
     scanner = Scanner(cfg, client)
 
     # Discord notifier
     notifier = DiscordNotifier(cfg.discord.webhook)
 
-    # Scan interval
+    # Scan every N seconds (from config.yaml)
     SCAN_INTERVAL = cfg.scan.interval_seconds
 
     # ───────────────────────────────────────────────────────────
@@ -37,25 +37,25 @@ def main():
         try:
             print("[SCAN] Running BTC mispricing scan…")
 
-            # Fetch opportunities (top 10 raw)
+            # Raw scan (returns ALL BTC opportunities)
             opps = scanner.run_scan()
 
             print(f"[SCAN] Found {len(opps)} BTC markets")
 
-            # Limit to top N signals (configurable)
+            # Trim to top N results for Discord
             top = opps[:cfg.scan.max_opportunities]
 
-            # Format Discord message
+            # Format and send to Discord
             msg = notifier.format_opportunities(top)
-
-            # Send to Discord (auto-split)
             notifier.send(msg)
 
-            # Print trade dry-runs
+            # Print local dry-run trades for future auto-exec
             for o in top:
                 print(
-                    f"[TRADE-DRY-RUN] Would trade side={o.side}, size={cfg.trade.default_size}, "
-                    f"market='{o.market.question}', edge={o.edge_bp/100:.2f}%"
+                    f"[TRADE-DRY-RUN] Would trade side={o.side}, "
+                    f"size={cfg.trade.default_size}, "
+                    f"market='{o.market.question}', "
+                    f"edge={o.edge_bp/100:.2f}%"
                 )
 
         except Exception as e:
@@ -63,6 +63,7 @@ def main():
             print(e)
             traceback.print_exc()
 
+            # Send error to Discord
             notifier.send(f"**Polymarket BTC Scanner Error:**\n```\n{e}\n```")
 
         # Sleep between scans
