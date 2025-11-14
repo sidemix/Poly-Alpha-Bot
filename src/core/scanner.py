@@ -1,10 +1,12 @@
 from __future__ import annotations
 from typing import List
-from ..integrations.polymarket_client import PolymarketClient
-from ..utils.config import AppConfig
-from ..strategies.btc_intraday import BTCIntraday
-from ..strategies.btc_price_target import BTCPriceTargets
-from ..strategies.btc_macro import BTCMacro
+from src.strategies.btc_intraday import BTCIntraday
+from src.strategies.btc_price_target import BTCPriceTargets
+from src.strategies.btc_macro import BTCMacro
+from src.integrations.polymarket_client import PolymarketClient
+from src.utils.config import AppConfig
+
+
 
 class Scanner:
     def __init__(self, cfg: AppConfig, client: PolymarketClient):
