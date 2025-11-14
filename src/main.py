@@ -1,72 +1,74 @@
-# src/main.py
-from __future__ import annotations
-
 import time
+import traceback
 
-from .utils.config import load_config
-from .integrations.polymarket_client import PolymarketClient
-from .integrations.discord_notifier import DiscordNotifier
-from .core.scanner import Scanner
-from .core.risk_engine import RiskEngine
-
-
-
-def format_discord_message(opps):
-    if not opps:
-        return "No BTC up/down opportunities found this scan."
-
-    lines = ["**Polymarket BTC Up/Down Scan**"]
-    for i, o in enumerate(opps, start=1):
-        title = o.market.question
-        url = o.market.url
-        yes_cents = round(o.yes_price * 100, 1)
-        fair_pct = round(o.fair_prob * 100, 1)
-        edge_pct = round(o.edge_bp / 100, 2)
-
-        lines.append(
-            f"\n**#{i}** {title}\n"
-            f"🌐 {url}\n"
-            f"💰 YES: {yes_cents}¢\n"
-            f"🎯 Fair Prob: {fair_pct}%\n"
-            f"📈 Edge: {edge_pct}% toward **{o.side}**"
-        )
-    return "\n".join(lines)
+from utils.config import load_config
+from integrations.polymarket_client import PolymarketClient
+from integrations.discord_notifier import DiscordNotifier
+from core.scanner import Scanner
 
 
 def main():
+    print("[BOOT] Polymarket alpha bot (Full BTC Scanner) started")
+
+    # ───────────────────────────────────────────────────────────
+    # Load config
+    # ───────────────────────────────────────────────────────────
     cfg = load_config()
-    client = PolymarketClient()
+
+    # Polymarket API client
+    client = PolymarketClient(
+        base_url=cfg.polymarket.base_url,
+        timeout=cfg.polymarket.timeout
+    )
+
+    # Scanner (BTC full scanner: intraday + targets + macro)
     scanner = Scanner(cfg, client)
-    discord = DiscordNotifier(cfg.discord.webhook_url)
-    risk = RiskEngine(cfg)
 
-    print("[BOOT] Polymarket alpha bot (BTC up/down v1) started")
+    # Discord notifier
+    notifier = DiscordNotifier(cfg.discord.webhook)
 
+    # Scan interval
+    SCAN_INTERVAL = cfg.scan.interval_seconds
+
+    # ───────────────────────────────────────────────────────────
+    # Main Loop
+    # ───────────────────────────────────────────────────────────
     while True:
-        print("[SCAN] Running BTC up/down scan…")
-        opps = scanner.run_scan()
+        try:
+            print("[SCAN] Running BTC mispricing scan…")
 
-        msg = format_discord_message(opps)
-        discord.send(msg)
+            # Fetch opportunities (top 10 raw)
+            opps = scanner.run_scan()
 
-        for o in opps:
-            # For now, just log dry-run trade decisions.
-            decision = risk.should_trade()
-            if not decision.allowed:
-                print(f"[TRADE] Skipping trade: {decision.reason}")
-                continue
+            print(f"[SCAN] Found {len(opps)} BTC markets")
 
-            size = risk.compute_position_size()
-            print(
-                f"[TRADE-DRY-RUN] Would trade side={o.side}, "
-                f"size=${size:.2f} on market='{o.market.question}' "
-                f"edge={o.edge_bp/100:.2f}%"
-            )
+            # Limit to top N signals (configurable)
+            top = opps[:cfg.scan.max_opportunities]
 
-        print(f"[SLEEP] Sleeping {cfg.scan.scan_interval_sec} seconds…")
-        time.sleep(cfg.scan.scan_interval_sec)
+            # Format Discord message
+            msg = notifier.format_opportunities(top)
+
+            # Send to Discord (auto-split)
+            notifier.send(msg)
+
+            # Print trade dry-runs
+            for o in top:
+                print(
+                    f"[TRADE-DRY-RUN] Would trade side={o.side}, size={cfg.trade.default_size}, "
+                    f"market='{o.market.question}', edge={o.edge_bp/100:.2f}%"
+                )
+
+        except Exception as e:
+            print("[ERROR] Exception during scan:")
+            print(e)
+            traceback.print_exc()
+
+            notifier.send(f"**Polymarket BTC Scanner Error:**\n```\n{e}\n```")
+
+        # Sleep between scans
+        print(f"[SLEEP] Sleeping {SCAN_INTERVAL} seconds…\n")
+        time.sleep(SCAN_INTERVAL)
 
 
 if __name__ == "__main__":
     main()
-
