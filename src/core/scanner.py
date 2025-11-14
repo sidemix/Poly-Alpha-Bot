@@ -1,21 +1,39 @@
-# src/core/scanner.py
 from __future__ import annotations
-
 from typing import List
-
-from ..integrations.polymarket_client import PolymarketClient, Market
+from ..integrations.polymarket_client import PolymarketClient
 from ..utils.config import AppConfig
-from ..strategies.btc_up_down import BTCUpDownStrategy, ScoredOpportunity
-
+from ..strategies.btc_intraday import BTCIntraday
+from ..strategies.btc_price_target import BTCPriceTargets
+from ..strategies.btc_macro import BTCMacro
 
 class Scanner:
-    def __init__(self, config: AppConfig, client: PolymarketClient):
-        self.cfg = config
+    def __init__(self, cfg: AppConfig, client: PolymarketClient):
+        self.cfg = cfg
         self.client = client
-        self.btc_strategy = BTCUpDownStrategy(config)
 
-    def run_scan(self) -> List[ScoredOpportunity]:
-        markets: list[Market] = self.client.fetch_open_markets()
-        opps = self.btc_strategy.find_opportunities(markets)
-        return opps[:5]
+        self.strats = [
+            BTCIntraday(cfg),
+            BTCPriceTargets(cfg),
+            BTCMacro(cfg)
+        ]
 
+    def get_btc_price(self):
+        # placeholder: soon we plug Binance/Coinbase API here
+        return None
+
+    def run_scan(self):
+        markets = self.client.fetch_open_markets()
+        current_price = 0  # plug in real BTC later
+
+        opps = []
+        for m in markets:
+            if not ("bitcoin" in m.question.lower() or "btc" in m.question.lower()):
+                continue
+
+            for strat in self.strats:
+                scored = strat.score(m, current_price)
+                if scored:
+                    opps.append(scored)
+
+        opps.sort(key=lambda o: abs(o.edge_bp), reverse=True)
+        return opps[:10]
