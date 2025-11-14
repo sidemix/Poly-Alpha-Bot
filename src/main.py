@@ -10,6 +10,7 @@ from .core.scanner import Scanner
 from .core.risk_engine import RiskEngine
 
 
+
 def format_discord_message(opps):
     if not opps:
         return "No BTC up/down opportunities found this scan."
