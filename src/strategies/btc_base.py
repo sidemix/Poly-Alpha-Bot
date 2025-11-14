@@ -1,29 +1,46 @@
+"""
+Base class for trading strategies used by the Polymarket scanner.
+
+Right now this is intentionally very minimal — it just gives BTCIntraday
+(and any future strategies) a common parent type and a few helper hooks
+the scanner *might* call.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Dict, Any
-
-from ..integrations.polymarket_client import Market
+from typing import List, Optional
 
 
-@dataclass
-class ScoredOpportunity:
-    market: Market
-    edge_bp: float            # (fair_prob - market_yes_prob) * 10,000
-    side: str                 # "YES" or "NO"
-    fair_prob: float          # 0..1
-    yes_price: float          # 0..1
-    no_price: float           # 0..1
-    type: str                 # "intraday" | "target" | "macro"
-    meta: Dict[str, Any] = field(default_factory=dict)  # extra fields (strike, spot, T, etc.)
+class BaseStrategy:
+    """
+    Base class for all strategies.
 
-class BTCBase:
-    def _days_to_expiry(self, end_time: datetime) -> float:
-        now = datetime.now(timezone.utc)
-        return max((end_time - now).total_seconds() / 86400.0, 0.0)
+    You can extend this later with shared helpers (logging, filters,
+    risk constraints, etc.) without touching the scanner.
+    """
 
-    def is_btc_market(self, market: Market) -> bool:
-        q = market.question.lower()
-        u = market.url.lower()
-        return ("bitcoin" in q) or ("btc" in q) or ("btc-" in u)
+    # Human-readable name for logs / Discord, etc.
+    name: str = "base-strategy"
+
+    def filter_markets(self, markets: List["Market"]) -> List["Market"]:
+        """
+        Optional pre-filter hook.
+
+        Default: return markets unchanged.
+        If a strategy wants to only look at BTC markets, or only sports,
+        it can override this.
+        """
+        return markets
+
+    def score(self, market: "Market", ref_price: float) -> Optional["Opportunity"]:
+        """
+        Main scoring interface.
+
+        Strategy should return:
+        - an Opportunity instance when the market looks interesting, OR
+        - None if this market should be ignored.
+
+        This is meant to be overridden by concrete strategies like
+        BTCIntraday.
+        """
+        raise NotImplementedError("score() must be implemented by strategy subclasses")
