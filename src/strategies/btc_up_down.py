@@ -22,10 +22,19 @@ class BTCUpDownStrategy:
     def __init__(self, config: AppConfig):
         self.cfg = config
 
-    # 🔒 Now only true "Bitcoin up or down" style questions
     def is_btc_up_down_market(self, market: Market) -> bool:
+        """
+        Treat as 'up/down' style if:
+        - question mentions bitcoin/BTC
+        - AND it talks about up/down/above/below/over/under
+        """
         q = market.question.lower()
-        return "bitcoin" in q and "up or down" in q
+
+        if "bitcoin" not in q and "btc" not in q:
+            return False
+
+        keywords = ["up or down", "up/down", "up", "down", "above", "below", "over", "under"]
+        return any(k in q for k in keywords)
 
     def _time_to_expiry_hours(self, end_time: datetime) -> float:
         now = datetime.now(timezone.utc)
@@ -36,14 +45,15 @@ class BTCUpDownStrategy:
         return max((end_time - now).total_seconds() / 86400.0, 0.0)
 
     def estimate_fair_prob(self, market: Market) -> float:
-        """
-        Placeholder fair prob model, still flat 0.5 for now.
-        We'll plug in live BTC price vs strike later.
-        """
+        # placeholder, we’ll plug in real BTC logic later
         return 0.5
 
     def score_market(self, market: Market) -> ScoredOpportunity | None:
         if not self.is_btc_up_down_market(market):
+            return None
+
+        # enforce short horizon here too
+        if self._days_to_expiry(market.end_time) > self.cfg.scan.max_resolution_days:
             return None
 
         if len(market.outcomes) < 2:
@@ -75,23 +85,17 @@ class BTCUpDownStrategy:
         for m in markets:
             if self.is_btc_up_down_market(m):
                 btc_markets += 1
-
-                # ⏱ filter out far-dated markets using MAX_RESOLUTION_DAYS
-                days = self._days_to_expiry(m.end_time)
-                if days > self.cfg.scan.max_resolution_days:
+                scored = self.score_market(m)
+                if not scored:
                     continue
 
-            scored = self.score_market(m)
-            if not scored:
-                continue
+                if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
+                    continue
 
-            if abs(scored.edge_bp) < self.cfg.scan.min_edge_bp:
-                continue
-
-            opps.append(scored)
+                opps.append(scored)
 
         print(
-            f"[BTC_STRAT] saw {btc_markets} BTC up/down markets, "
+            f"[BTC_STRAT] saw {btc_markets} BTC up/down-like markets, "
             f"{len(opps)} passed time + edge filters"
         )
 
