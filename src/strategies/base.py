@@ -28,12 +28,14 @@ class BaseStrategy:
       - score_many(markets, btc_price) -> List[ScoredOpportunity]
     """
 
-    def __init__(self, cfg: Any, name: str) -> None:
+    def __init__(self, cfg: Any, name: Optional[str] = None) -> None:
+        # cfg = full app Config (so strategies can read thresholds, etc.)
         self.cfg = cfg
-        self.name = name
+        # If no name is provided, default to the class name (e.g. "BTCIntraday")
+        self.name = name or self.__class__.__name__
 
     # ------------------------------------------------------------------ #
-    # ABSTRACT PER-MARKET SCORING
+    # ABSTRACT PER-MARKET SCORING (to be implemented by each strategy)
     # ------------------------------------------------------------------ #
 
     def score(
