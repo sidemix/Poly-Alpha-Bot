@@ -1,9 +1,8 @@
 import logging
-from typing import List
+from typing import List, Any
 
 import requests
 
-from ..config import Config
 from ..parser import parse_markets
 from ..strategies.base import BaseStrategy, ScoredOpportunity
 from ..strategies.btc_intraday import BTCIntraday
@@ -21,9 +20,8 @@ class Scanner:
       - Return a flat list of ScoredOpportunity objects
     """
 
-    def __init__(self, cfg: Config, client: object) -> None:
-        # We keep `client` in the signature so main.py can still pass it,
-        # but we don't rely on any specific client methods here.
+    def __init__(self, cfg: Any, client: Any) -> None:
+        # We keep these arguments so main.py can still pass in whatever it wants.
         self.cfg = cfg
         self.client = client
 
