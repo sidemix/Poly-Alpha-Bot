@@ -1,89 +1,133 @@
 # src/strategies/btc_intraday.py
 
-from dataclasses import dataclass
-from typing import Optional
+from __future__ import annotations
+
+from typing import Any, Optional
+
 from .base import BaseStrategy
 
-def _s(x: Optional[str]) -> str:
-    return x.lower().strip() if isinstance(x, str) else ""
-
-@dataclass
-class MarketView:
-    id: str
-    url: Optional[str]
-    title: Optional[str]
-    question: Optional[str]
-    group: Optional[str]
-    yes_price: Optional[float]
-    no_price: Optional[float]
-    end_ts: Optional[int]
-    tags: Optional[list]
 
 class BTCIntraday(BaseStrategy):
     """
-    Scores Polymarket 'Bitcoin up or down' / intraday price-to-beat style markets.
-    Hardened against None url/title/etc.
+    Simple intraday BTC mispricing strategy for Polymarket.
+
+    - Filters for BTC intraday / "up or down" style markets.
+    - Returns a minimal dict describing an opportunity, or None.
+
+    This version is defensive:
+    - Never assumes market.url/title/question are non-null
+    - Avoids crashing on weird / malformed markets
     """
 
-    INTRADAY_HINTS = (
-        "bitcoin up or down",
-        "btc up or down",
-        "price to beat",
-        "up or down",
-        "intraday",
-        "today",
-        "within 24h",
-        "24h",
-    )
+    name = "btc-intraday"
 
-    BTC_HINTS = (
-        "btc", "bitcoin", "xbt"
-    )
+    def is_intraday(self, market: Any) -> bool:
+        """
+        Decide whether this market looks like an intraday BTC market.
 
-    def is_intraday(self, market: MarketView) -> bool:
-        u   = _s(market.url)
-        ttl = _s(market.title) or _s(market.question)
-        grp = _s(market.group)
+        We only use attributes if they exist and are strings; otherwise
+        we ignore them. This prevents 'NoneType' errors.
+        """
+        url = getattr(market, "url", None)
+        title = getattr(market, "title", None)
+        question = getattr(market, "question", None)
 
-        text = " ".join([u, ttl, grp]).strip()
-        if not text:
+        parts = []
+        if isinstance(url, str):
+            parts.append(url)
+        if isinstance(title, str):
+            parts.append(title)
+        if isinstance(question, str):
+            parts.append(question)
+
+        if not parts:
+            # Nothing to inspect, bail out
             return False
 
-        # Must reference BTC/Bitcoin
-        if not any(h in text for h in self.BTC_HINTS):
+        text = " ".join(parts).lower()
+
+        # Must clearly be BTC-related
+        if "bitcoin" not in text and "btc" not in text:
             return False
 
-        # Must look like an intraday/short-horizon structure
-        if not any(h in text for h in self.INTRADAY_HINTS):
-            return False
+        # Intraday / “up or down today” style markers
+        intraday_markers = [
+            "up or down",
+            "up/down",
+            "price to beat",
+            "ends today",
+            "today's price",
+            "today’s price",
+        ]
 
-        return True
+        return any(m in text for m in intraday_markers)
 
-    def score(self, market: MarketView, btc_spot: float) -> Optional[float]:
-        # Filter to intraday BTC markets only (safe guard)
+    def score(self, market: Any, btc_price: float) -> Optional[dict]:
+        """
+        Main scoring function.
+
+        Returns:
+            - dict with basic info if it's a tradable opportunity
+            - None if we should skip the market
+
+        NOTE: This stays deliberately minimal so it doesn't depend on
+        any specific models.py dataclasses. Downstream code can treat
+        the dict as an "Opportunity-like" object.
+        """
+        # First, filter to intraday BTC markets
         if not self.is_intraday(market):
             return None
 
-        # Require prices
-        y, n = market.yes_price, market.no_price
-        if y is None and n is None:
+        # Defensive attribute access
+        title = (
+            getattr(market, "title", None)
+            or getattr(market, "question", None)
+            or ""
+        )
+        url = getattr(market, "url", "") or ""
+
+        yes_price = getattr(market, "yes_price", None)
+        no_price = getattr(market, "no_price", None)
+
+        # If we don’t have prices, skip quietly
+        if yes_price is None or no_price is None:
             return None
 
-        # Simple asymmetry: look for implied probs 0.10–0.18 on either side
-        # (you can customize your exact mispricing math here)
-        score = 0.0
-        if y is not None:
-            p_yes = y
-            if 0.10 <= p_yes <= 0.18:
-                score += (0.18 - p_yes) * 10
-        if n is not None:
-            p_no = n
-            if 0.10 <= p_no <= 0.18:
-                score += (0.18 - p_no) * 10
+        title_lower = title.lower()
 
-        # Nudge for recency if end time is soon
-        if market.end_ts:
-            # sooner expiry → larger score
-            score += self._soon_bonus(market.end_ts)
+        # Crude direction guess from the text
+        if "up" in title_lower and "down" not in title_lower:
+            direction = "up"
+        elif "down" in title_lower and "up" not in title_lower:
+            direction = "down"
+        else:
+            direction = "unknown"
 
-        return round(score, 4) if score > 0 else None
+        # Try to extract a rough strike from the title, e.g. "above 95,000"
+        import re
+
+        cleaned = title.replace(",", "")
+        m = re.search(r"(\d{4,7})", cleaned)
+        strike = float(m.group(1)) if m else None
+
+        edge = 0.0
+        if strike is not None:
+            # Very naive "edge" heuristic:
+            # if BTC is already beyond the strike in the implied direction
+            # and YES is still cheap, treat as positive edge.
+            if direction == "up" and btc_price > strike:
+                # assume "true" probability ~60% if already above strike
+                edge = 0.60 - yes_price
+            elif direction == "down" and btc_price < strike:
+                edge = 0.60 - yes_price
+
+        return {
+            "title": title,
+            "url": url,
+            "direction": direction,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "edge": edge,
+            # keep the raw market object in case downstream wants it
+            "market": market,
+        }
