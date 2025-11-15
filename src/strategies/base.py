@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 
 from ..models import Market, Opportunity
 
@@ -9,33 +9,75 @@ from ..models import Market, Opportunity
 @dataclass
 class ScoredOpportunity:
     """
-    A wrapper that couples an Opportunity with a numeric score
-    so the scanner can rank and sort results across strategies.
+    Wrapper for a single strategy recommendation on a given market.
     """
+    market: Market
     opportunity: Opportunity
     score: float
+    strategy: str
 
 
 class BaseStrategy:
     """
     Base class for all Polymarket BTC strategies.
 
-    Subclasses should override `score(self, market, ref_price)` and
-    return a list of ScoredOpportunity objects (possibly empty).
+    Every strategy must implement:
+      - score(market, btc_price) -> Optional[ScoredOpportunity]
+
+    And gets for free:
+      - score_many(markets, btc_price) -> List[ScoredOpportunity]
     """
 
-    def __init__(self, cfg: Any, name: str | None = None) -> None:
-        # cfg is your global Config object (or similar)
+    def __init__(self, cfg: Any, name: str) -> None:
         self.cfg = cfg
-        # If no explicit name is passed, default to the class name
-        self.name = name or self.__class__.__name__
+        self.name = name
 
-    def score(self, market: Market, ref_price: float) -> List[ScoredOpportunity]:
-        """
-        Evaluate a single market against the strategy.
+    # ------------------------------------------------------------------ #
+    # ABSTRACT PER-MARKET SCORING
+    # ------------------------------------------------------------------ #
 
-        :param market: Parsed Market instance
-        :param ref_price: Reference BTC price (spot or index)
-        :return: A list of ScoredOpportunity instances
+    def score(
+        self,
+        market: Market,
+        btc_price: float,
+    ) -> Optional[ScoredOpportunity]:
         """
-        raise NotImplementedError("Subclasses must implement `score`")
+        Evaluate a single market for edge.
+
+        Must return:
+          - ScoredOpportunity if the market is interesting
+          - None if no trade should be taken
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------ #
+    # BATCH SCORING (USED BY Scanner)
+    # ------------------------------------------------------------------ #
+
+    def score_many(
+        self,
+        markets: List[Market],
+        btc_price: float,
+    ) -> List[ScoredOpportunity]:
+        """
+        Default batch implementation:
+        - loops over markets
+        - calls self.score(...)
+        - catches per-market errors so one bad market doesn't kill the scan
+        """
+        results: List[ScoredOpportunity] = []
+
+        for m in markets:
+            try:
+                scored = self.score(m, btc_price)
+                if scored is not None:
+                    results.append(scored)
+            except Exception as e:
+                mid = (
+                    getattr(m, "id", None)
+                    or getattr(m, "condition_id", None)
+                    or "?"
+                )
+                print(f"[{self.name}] failed on market {mid}: {e}")
+
+        return results
