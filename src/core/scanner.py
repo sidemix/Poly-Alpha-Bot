@@ -6,18 +6,16 @@ from ..integrations.price_feed import PriceFeed
 from ..utils.config import AppConfig
 from ..strategies.btc_intraday import BTCIntraday
 from ..strategies.btc_price_target import BTCPriceTargets
-# NOTE: we deliberately drop BTCMacro for now until it has a real model.
 
 class Scanner:
-    def __init__(self, cfg: AppConfig, client: PolymarketClient):
+    def __init__(self, cfg, client):
         self.cfg = cfg
         self.client = client
-        self.feed = PriceFeed()
-        self.strats = [
-            BTCIntraday(cfg),
-            BTCPriceTargets(cfg),
-            # BTCMacro(cfg),  # re-enable when macro model is implemented
+        self.strategies = [
+            BTCIntraday(),
+            BTCPriceTargets(),
         ]
+
 
     def run_scan(self):
         markets = self.client.fetch_open_markets()
