@@ -22,7 +22,8 @@ class Scanner:
     def __init__(self, cfg: Any, client: Any) -> None:
         """
         :param cfg: your loaded Config object (or simple dict-like)
-        :param client: Polymarket client with a fetch_markets/get_markets method
+        :param client: Polymarket client (still passed in for future use,
+                       but market loading now has an HTTP fallback)
         """
         self.cfg = cfg
         self.client = client
@@ -89,19 +90,54 @@ class Scanner:
         """
         Fetch raw markets from Polymarket, parse into Market models,
         store them on self.feed, and return.
+
+        Order of preference:
+        1) client.fetch_markets(limit=...)
+        2) client.get_markets(limit=...)
+        3) direct HTTP call to Polymarket /markets endpoint (fallback)
         """
 
-        # Support either client.fetch_markets(...) or client.get_markets(...)
+        raw = None
+
+        # 1) client.fetch_markets
         fetch_fn = getattr(self.client, "fetch_markets", None)
-        if fetch_fn is None:
-            fetch_fn = getattr(self.client, "get_markets", None)
+        if callable(fetch_fn):
+            try:
+                raw = fetch_fn(limit=limit)
+            except Exception as e:
+                print(f"[POLY] client.fetch_markets failed: {e}")
 
-        if fetch_fn is None:
-            raise RuntimeError(
-                "Polymarket client has neither 'fetch_markets' nor 'get_markets'"
-            )
+        # 2) client.get_markets
+        if raw is None:
+            get_fn = getattr(self.client, "get_markets", None)
+            if callable(get_fn):
+                try:
+                    raw = get_fn(limit=limit)
+                except Exception as e:
+                    print(f"[POLY] client.get_markets failed: {e}")
 
-        raw = fetch_fn(limit=limit)
+        # 3) HTTP fallback directly to Polymarket
+        if raw is None:
+            try:
+                # This pattern matches what your sports tracker logs show:
+                # /markets?closed=false&limit=500&offset=0
+                url = (
+                    "https://clob.polymarket.com/markets"
+                    f"?closed=false&limit={limit}&offset=0"
+                )
+                resp = requests.get(url, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                # Some endpoints return a dict with "markets", others a bare list
+                if isinstance(data, list):
+                    raw = data
+                else:
+                    raw = data.get("markets", [])
+                print(" [POLY HTTP fallback]", end="")
+            except Exception as e:
+                print(f"[POLY] HTTP fallback /markets failed: {e}")
+                raw = []
+
         raw_len = len(raw) if raw is not None else 0
         print(f"[POLY] fetched {raw_len} raw markets", end="")
 
@@ -144,9 +180,6 @@ class Scanner:
             except Exception as e:
                 # Protect the whole scanner from one bad strategy
                 print(f"[SCAN] Strategy '{strat.name}' failed: {e}")
-
-            # Optional: per-strategy debug
-            # print(f"[SCAN] {strat.name} produced {len(scored)} opps")
 
         # Sort by score, highest first
         all_scored.sort(key=lambda s: s.score, reverse=True)
