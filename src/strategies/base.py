@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Union
-from abc import ABC, abstractmethod
+from typing import Any, List
 
 from ..models import Market, Opportunity
 
@@ -10,41 +9,33 @@ from ..models import Market, Opportunity
 @dataclass
 class ScoredOpportunity:
     """
-    Wrapper tying a raw trading opportunity to a numeric score and
-    strategy name, so the scanner can sort and display them.
+    A wrapper that couples an Opportunity with a numeric score
+    so the scanner can rank and sort results across strategies.
     """
     opportunity: Opportunity
     score: float
-    strategy: str  # e.g. "BTC Intraday" or "BTC Price Targets"
 
 
-class BaseStrategy(ABC):
+class BaseStrategy:
     """
-    Common parent for all strategies.
+    Base class for all Polymarket BTC strategies.
 
-    Each strategy:
-      - gets a reference to the global config (cfg)
-      - has a human-readable name
-      - implements score(market, btc_price)
+    Subclasses should override `score(self, market, ref_price)` and
+    return a list of ScoredOpportunity objects (possibly empty).
     """
 
-    def __init__(self, cfg, name: str) -> None:
+    def __init__(self, cfg: Any, name: str | None = None) -> None:
+        # cfg is your global Config object (or similar)
         self.cfg = cfg
-        self.name = name
+        # If no explicit name is passed, default to the class name
+        self.name = name or self.__class__.__name__
 
-    @abstractmethod
-    def score(
-        self,
-        market: Market,
-        btc_price: float,
-    ) -> Optional[ScoredOpportunity] | List[ScoredOpportunity]:
+    def score(self, market: Market, ref_price: float) -> List[ScoredOpportunity]:
         """
-        Inspect a single Polymarket market + current BTC price and decide
-        whether there is a trade.
+        Evaluate a single market against the strategy.
 
-        Returns:
-          - None  -> no trade
-          - ScoredOpportunity  -> one trade
-          - list[ScoredOpportunity] -> multiple related trades
+        :param market: Parsed Market instance
+        :param ref_price: Reference BTC price (spot or index)
+        :return: A list of ScoredOpportunity instances
         """
-        raise NotImplementedError
+        raise NotImplementedError("Subclasses must implement `score`")
