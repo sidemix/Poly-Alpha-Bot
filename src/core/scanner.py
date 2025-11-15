@@ -1,188 +1,211 @@
-from __future__ import annotations
+# src/core/scanner.py
 
-from typing import List, Callable, Any
+import logging
+from typing import List, Sequence, Optional, Any, Dict
+
 import requests
 
-from ..parser import parse_markets
 from ..models import Market
 from ..strategies.base import BaseStrategy, ScoredOpportunity
-from ..strategies.btc_intraday import BTCIntraday
-from ..strategies.btc_price_target import BTCPriceTargets
+
+logger = logging.getLogger(__name__)
 
 
 class Scanner:
     """
-    Main coordinator for:
-    - Fetching markets from Polymarket
-    - Normalizing them into Market models
-    - Fetching BTC spot price
-    - Running all BTC strategies and returning scored opportunities
+    Main orchestrator: fetch markets, run each strategy, aggregate and return best opps.
     """
 
-    def __init__(self, cfg: Any, client: Any) -> None:
+    def __init__(self, cfg, client):
         """
-        :param cfg: your loaded Config object (or simple dict-like)
-        :param client: Polymarket client (still passed in for future use,
-                       but market loading now has an HTTP fallback)
+        :param cfg: Config object (has .env, .discord, etc if you need)
+        :param client: Polymarket client (whatever your existing code was using)
         """
         self.cfg = cfg
         self.client = client
 
-        # All active BTC strategies live here
-        self.strats: List[BaseStrategy] = [
-            BTCIntraday(cfg),
-            BTCPriceTargets(cfg),
-        ]
+        # IMPORTANT: strategies are passed in from main.py so we don't change that contract.
+        # main.py does: Scanner(cfg, client, [BTCIntraday(cfg), BTCPriceTargets(cfg)])
+        self.strats: List[BaseStrategy] = []
 
-        # Last parsed markets feed (for debugging / reuse)
-        self.feed: List[Market] = []
-
-    # --------------------------------------------------------------------- #
-    # BTC PRICE FETCHING
-    # --------------------------------------------------------------------- #
-
-    def _fetch_btc_price(self) -> float:
+    def set_strategies(self, strategies: Sequence[BaseStrategy]) -> None:
         """
-        Try multiple public endpoints to get a BTC/USD (or USDT) spot price.
-        Falls back through Binance → Coinbase → CoinGecko.
-
-        Returns 0.0 only if everything fails.
+        Called by main.py after constructing Scanner so we don't break your existing config.
         """
+        self.strats = list(strategies)
+        names = ", ".join(s.name for s in self.strats)
+        logger.info(f"[SCAN] Registered strategies: {names}")
 
-        endpoints: List[tuple[str, str, Callable[[dict], float]]] = [
-            (
-                "Binance",
-                "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-                lambda d: float(d["price"]),
-            ),
-            (
-                "Coinbase",
-                "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-                lambda d: float(d["price"]),
-            ),
-            (
-                "CoinGecko",
-                "https://api.coingecko.com/api/v3/simple/price"
-                "?ids=bitcoin&vs_currencies=usd",
-                lambda d: float(d["bitcoin"]["usd"]),
-            ),
-        ]
+    # -------------------------
+    # Public API
+    # -------------------------
 
-        for name, url, extractor in endpoints:
-            try:
-                resp = requests.get(url, timeout=5)
-                resp.raise_for_status()
-                data = resp.json()
-                price = extractor(data)
-                print(f"[PRICE] BTC/USD={price:.2f} (via {name})")
-                return price
-            except Exception as e:
-                print(f"[PRICE] {name} price fetch failed: {e}")
+    def run_scan(self, limit: int = 500) -> List[ScoredOpportunity]:
+        logger.info("[SCAN] Running BTC mispricing scan…")
 
-        print("[PRICE] All BTC price endpoints failed; defaulting to 0.")
-        return 0.0
+        # 1) Get markets
+        markets = self._load_markets(limit=limit)
+        logger.info(f"[SCAN] Loaded {len(markets)} parsed markets from Polymarket")
 
-    # --------------------------------------------------------------------- #
-    # MARKET LOADING
-    # --------------------------------------------------------------------- #
+        if not markets:
+            logger.warning("[SCAN] No markets returned; skipping strategies.")
+            return []
 
-    def _load_markets(self, limit: int = 500) -> List[Market]:
-        """
-        Fetch raw markets from Polymarket, parse into Market models,
-        store them on self.feed, and return.
-
-        Order of preference:
-        1) client.fetch_markets(limit=...)
-        2) client.get_markets(limit=...)
-        3) direct HTTP call to Polymarket /markets endpoint (fallback)
-        """
-
-        raw = None
-
-        # 1) client.fetch_markets
-        fetch_fn = getattr(self.client, "fetch_markets", None)
-        if callable(fetch_fn):
-            try:
-                raw = fetch_fn(limit=limit)
-            except Exception as e:
-                print(f"[POLY] client.fetch_markets failed: {e}")
-
-        # 2) client.get_markets
-        if raw is None:
-            get_fn = getattr(self.client, "get_markets", None)
-            if callable(get_fn):
-                try:
-                    raw = get_fn(limit=limit)
-                except Exception as e:
-                    print(f"[POLY] client.get_markets failed: {e}")
-
-        # 3) HTTP fallback directly to Polymarket
-        if raw is None:
-            try:
-                # This pattern matches what your sports tracker logs show:
-                # /markets?closed=false&limit=500&offset=0
-                url = (
-                    "https://clob.polymarket.com/markets"
-                    f"?closed=false&limit={limit}&offset=0"
-                )
-                resp = requests.get(url, timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
-                # Some endpoints return a dict with "markets", others a bare list
-                if isinstance(data, list):
-                    raw = data
-                else:
-                    raw = data.get("markets", [])
-                print(" [POLY HTTP fallback]", end="")
-            except Exception as e:
-                print(f"[POLY] HTTP fallback /markets failed: {e}")
-                raw = []
-
-        raw_len = len(raw) if raw is not None else 0
-        print(f"[POLY] fetched {raw_len} raw markets", end="")
-
-        markets: List[Market] = parse_markets(raw or [])
-        print(f", parsed {len(markets)} usable markets")
-
-        self.feed = markets
-        return markets
-
-    # --------------------------------------------------------------------- #
-    # MAIN SCAN LOOP
-    # --------------------------------------------------------------------- #
-
-    def run_scan(self) -> List[ScoredOpportunity]:
-        """
-        Run full BTC mispricing scan:
-        - fetch BTC price
-        - fetch & parse markets
-        - run each strategy
-        - return all scored opportunities sorted by score desc
-        """
-
-        print("[SCAN] Running BTC mispricing scan…")
-
+        # 2) Fetch BTC price (you already have this helper elsewhere)
         btc_price = self._fetch_btc_price()
-        markets = self._load_markets(limit=500)
+        logger.info(f"[PRICE] BTC/USD={btc_price:.2f} (via Coinbase)")
 
-        # If BTC price is 0, you *can* early-exit, but for now we just warn.
-        if btc_price <= 0:
-            print(
-                "[SCAN] BTC price unavailable or zero; strategies may produce no edge."
-            )
-
+        # 3) Run each strategy safely
         all_scored: List[ScoredOpportunity] = []
-
         for strat in self.strats:
             try:
                 scored = strat.score_many(markets, btc_price)
+                logger.info(f"[SCAN] Strategy '{strat.name}' produced {len(scored)} opps")
                 all_scored.extend(scored)
             except Exception as e:
-                # Protect the whole scanner from one bad strategy
-                print(f"[SCAN] Strategy '{strat.name}' failed: {e}")
+                logger.exception(f"[SCAN] Strategy '{strat.name}' failed: {e}")
 
-        # Sort by score, highest first
-        all_scored.sort(key=lambda s: s.score, reverse=True)
-
-        print(f"[SCAN] Scanner returned {len(all_scored)} BTC opportunities")
+        # 4) Sort by score desc and return
+        all_scored.sort(key=lambda o: o.score, reverse=True)
+        logger.info(f"[SCAN] Scanner returning {len(all_scored)} BTC opportunities")
         return all_scored
+
+    # -------------------------
+    # Market loading
+    # -------------------------
+
+    def _load_markets(self, limit: int) -> List[Market]:
+        """
+        Try official client first; if that fails or returns empty, fall back to HTTP.
+        """
+        markets: List[Market] = []
+
+        # Try to use client if it has a markets method
+        try:
+            if hasattr(self.client, "get_markets"):
+                logger.info("[POLY] Using client.get_markets()")
+                raw = self.client.get_markets(limit=limit)
+            elif hasattr(self.client, "fetch_markets"):
+                logger.info("[POLY] Using client.fetch_markets()")
+                raw = self.client.fetch_markets(limit=limit)
+            else:
+                logger.warning(
+                    "[POLY] Client has no get_markets/fetch_markets; skipping to HTTP fallback"
+                )
+                raw = None
+
+            if raw:
+                logger.info(
+                    f"[POLY] client returned {len(raw)} raw markets; parsing via parse_markets()"
+                )
+                from ..parser import parse_markets
+
+                markets = parse_markets(raw)
+                logger.info(
+                    f"[POLY] Parsed {len(markets)} usable markets from client response"
+                )
+
+            if markets:
+                return markets
+
+        except Exception as e:
+            logger.exception(f"[POLY] Client market fetch failed: {e}")
+
+        # HTTP fallback
+        logger.info(" [POLY HTTP fallback] Trying direct HTTP markets endpoint…")
+        raw_http = self._fallback_fetch_markets_http(limit=limit)
+
+        # If *still* nothing, log what happened in detail
+        if not raw_http:
+            logger.warning(
+                "[POLY HTTP fallback] HTTP fetch returned 0 raw markets. "
+                "Enable DEBUG logs to see full response details."
+            )
+            return []
+
+        try:
+            from ..parser import parse_markets
+
+            markets = parse_markets(raw_http)
+            logger.info(
+                f"[POLY HTTP fallback] Parsed {len(markets)} usable markets from HTTP response"
+            )
+        except Exception as e:
+            logger.exception(
+                f"[POLY HTTP fallback] Failed to parse HTTP markets response: {e}"
+            )
+            return []
+
+        return markets
+
+    def _fallback_fetch_markets_http(self, limit: int) -> List[Dict[str, Any]]:
+        """
+        Call Polymarket public HTTP API directly and log enough that we can see
+        why you're getting 0 raw markets.
+        """
+        # Common public endpoint used by tooling (if this ever changes, we’ll see via logs)
+        url = "https://gamma-api.polymarket.com/markets"
+        params = {
+            "limit": limit,
+            "offset": 0,
+            "closed": "false",
+            # You can add filters like 'category' or 'ticker' later
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            logger.info(
+                f"[POLY HTTP fallback] GET {resp.url} -> {resp.status_code}"
+            )
+
+            # Log a small slice of body when nothing comes back
+            text_preview = resp.text[:400].replace("\n", " ")
+            logger.debug(
+                f"[POLY HTTP fallback] Raw body preview (first 400 chars): {text_preview}"
+            )
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Polymarket APIs usually return either:
+            # { "markets": [...] } or a raw list
+            if isinstance(data, dict) and "markets" in data:
+                markets = data["markets"] or []
+            elif isinstance(data, list):
+                markets = data
+            else:
+                logger.warning(
+                    "[POLY HTTP fallback] Unexpected JSON shape from Polymarket; "
+                    f"type={type(data)} keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}"
+                )
+                markets = []
+
+            logger.info(
+                f"[POLY HTTP fallback] fetched {len(markets)} raw markets from HTTP"
+            )
+            return markets
+
+        except Exception as e:
+            logger.exception(f"[POLY HTTP fallback] Exception fetching markets: {e}")
+            return []
+
+    # -------------------------
+    # BTC price helper
+    # -------------------------
+
+    def _fetch_btc_price(self) -> float:
+        """
+        You already had a Binance + Coinbase fallback in main;
+        keep that behavior here for clarity.
+        """
+        from ..integrations.price_feeds import get_btc_price
+
+        try:
+            price = get_btc_price()
+            return float(price)
+        except Exception as e:
+            logger.error(
+                f"[PRICE] Failed to fetch BTC price; defaulting to 0. "
+                f"Fair prob will degrade. {e}"
+            )
+            return 0.0
