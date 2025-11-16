@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Sequence
 
 from ..models import Market
 from ..parser import parse_markets
@@ -12,146 +12,157 @@ logger = logging.getLogger(__name__)
 
 class Scanner:
     """
-    Main Polymarket BTC scanner.
-
-    - Loads markets from Gamma HTTP API
-    - Parses them into Market objects
-    - Filters to BTC/Bitcoin markets
-    - Runs each strategy's score_many()
+    Orchestrates:
+      1) Fetching markets from Polymarket (client or HTTP fallback)
+      2) Filtering BTC markets
+      3) Running all BTC strategies and aggregating scored opportunities
     """
 
-    def __init__(self, cfg, client) -> None:
-        # cfg is whatever your main.py builds (no strict type needed here)
+    def __init__(self, cfg, client):
         self.cfg = cfg
         self.client = client
 
-        # All strategies must subclass BaseStrategy and implement score_many()
+        # Register strategies here
         self.strats: List[BaseStrategy] = [
-            BTCIntraday(name="BTCIntraday", cfg=cfg),
-            BTCPriceTargets(name="BTCPriceTargets", cfg=cfg),
+            BTCIntraday(cfg, name="BTCIntraday"),
+            BTCPriceTargets(cfg, name="BTCPriceTargets"),
         ]
-        logger.info(
-            "[SCAN] Scanner initialized with %d strategies: %s",
-            len(self.strats),
-            ", ".join(s.name for s in self.strats),
-        )
-
-    # ---------- Public API ----------
 
     def run_scan(self) -> List[ScoredOpportunity]:
         """
-        Run one full BTC mispricing scan and return scored opportunities.
+        High-level scan pipeline. Called from main.py every loop.
         """
-
         logger.info("[SCAN] Running BTC mispricing scan…")
 
-        # 1) Fetch BTC price (Binance → Coinbase fallback is inside get_btc_price)
+        # 1) Fetch BTC price
         btc_price = self._fetch_btc_price()
         logger.info("[PRICE] BTC/USD=%.2f", btc_price)
 
-        # 2) Fetch open markets from Gamma HTTP API
-        raw_markets = self._load_markets_http(limit=500)
-        logger.info("[SCAN] Loaded %d raw open markets from Polymarket", len(raw_markets))
-
-        # 3) Parse into Market objects
-        markets: List[Market] = parse_markets(raw_markets)
-        logger.info("[SCAN] Parsed %d markets after cleaning", len(markets))
-
+        # 2) Load and parse markets
+        markets: List[Market] = self._load_markets(limit=500)
         if not markets:
-            logger.warning("[SCAN] No markets parsed; returning 0 opportunities")
+            logger.warning("[SCAN] No markets loaded; returning 0 opportunities")
             return []
 
-        # 4) Filter to BTC/Bitcoin markets using Market.is_btc_market()
+        # 3) Filter to BTC markets using Market.is_btc_market()
         btc_markets: List[Market] = [m for m in markets if m.is_btc_market()]
         logger.info(
-            "[SCAN] BTC filter: %d / %d markets mention BTC or Bitcoin",
-            len(btc_markets),
+            "[SCAN] Loaded %d total markets; %d BTC markets after filter",
             len(markets),
+            len(btc_markets),
         )
 
-        # Log a few sample BTC markets so we can see what the bot is seeing
-        for m in btc_markets[:5]:
-            logger.info(
-                "[SCAN] Sample BTC market: '%s' | slug=%s | outcomes=%s",
-                m.title,
-                m.slug,
-                ",".join(m.outcomes or []),
-            )
-
         if not btc_markets:
-            logger.warning("[SCAN] No BTC markets found in latest batch; returning 0 opportunities")
+            logger.warning("[SCAN] No BTC-like markets found; returning 0 opportunities")
             return []
 
-        # 5) Run strategies
-        all_scored: List[ScoredOpportunity] = []
+        # 4) Run each strategy and aggregate opportunities
+        all_opps: List[ScoredOpportunity] = []
 
         for strat in self.strats:
             try:
-                scored = strat.score_many(btc_markets, btc_price)
+                strat_opps = strat.score_many(btc_markets, btc_price)
                 logger.info(
-                    "[SCAN] Strategy '%s' produced %d candidates",
+                    "[SCAN] Strategy '%s' produced %d opportunities",
                     strat.name,
-                    len(scored),
+                    len(strat_opps),
                 )
-                all_scored.extend(scored)
+                all_opps.extend(strat_opps)
             except Exception:
                 logger.exception("[SCAN] Strategy '%s' failed", strat.name)
 
-        # 6) Sort by score (highest first) and return
-        all_scored.sort(key=lambda s: s.score, reverse=True)
-        logger.info("[SCAN] Scanner returning %d BTC opportunities", len(all_scored))
-        return all_scored
+        # 5) Sort by score descending
+        all_opps.sort(key=lambda o: o.score, reverse=True)
 
-    # ---------- Internals ----------
+        logger.info(
+            "[SCAN] Scanner returning %d BTC opportunities (post-aggregation)",
+            len(all_opps),
+        )
+        return all_opps
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _load_markets(self, limit: int = 500) -> List[Market]:
+        """
+        Try Polymarket client first. If client doesn't expose get_markets/fetch_markets
+        or returns nothing, fall back to Gamma HTTP API.
+        """
+        raw = None
+
+        # --- 1) Try client-based fetch if available ---
+        if self.client is not None:
+            try:
+                if hasattr(self.client, "get_markets"):
+                    logger.info("[POLY] Fetching markets via client.get_markets(limit=%d)…", limit)
+                    raw = self.client.get_markets(limit=limit)
+                elif hasattr(self.client, "fetch_markets"):
+                    logger.info("[POLY] Fetching markets via client.fetch_markets(limit=%d)…", limit)
+                    raw = self.client.fetch_markets(limit=limit)
+                else:
+                    logger.info(
+                        "[POLY] Client has no get_markets/fetch_markets; skipping to HTTP fallback"
+                    )
+
+                if isinstance(raw, (list, tuple)) and raw:
+                    parsed = parse_markets(list(raw))
+                    logger.info(
+                        "[POLY] Client returned %d raw markets, parsed %d usable markets",
+                        len(raw),
+                        len(parsed),
+                    )
+                    return parsed
+            except Exception:
+                logger.exception("[POLY] Error fetching markets from client; falling back to HTTP")
+
+        # --- 2) HTTP fallback (Gamma API) ---
+        try:
+            import requests
+
+            url = (
+                "https://gamma-api.polymarket.com/markets?"
+                f"limit={limit}&active=true&closed=false"
+            )
+            logger.info("[POLY HTTP fallback] GET %s", url)
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            raw = resp.json() or []
+            if not isinstance(raw, list):
+                logger.warning(
+                    "[POLY HTTP fallback] Expected list from Gamma, got %s",
+                    type(raw),
+                )
+                return []
+
+            parsed = parse_markets(raw)
+            logger.info(
+                "[POLY HTTP fallback] fetched %d raw markets, parsed %d usable markets",
+                len(raw),
+                len(parsed),
+            )
+            return parsed
+
+        except Exception as e:
+            logger.error(
+                "[POLY HTTP fallback] failed to fetch markets: %s",
+                e,
+                exc_info=True,
+            )
+            return []
 
     def _fetch_btc_price(self) -> float:
         """
-        Use shared price_feeds helper (Binance → Coinbase fallback).
+        Unified BTC price helper – delegates to integrations.price_feeds.get_btc_price.
         """
-        from ..integrations.price_feeds import get_btc_price
-
         try:
+            from ..integrations.price_feeds import get_btc_price
+
             return float(get_btc_price())
         except Exception as e:
-            logger.exception(
-                "[PRICE] Fatal error fetching BTC price; defaulting to 0. %s",
+            logger.error(
+                "[PRICE] Failed to fetch BTC price; defaulting to 0. Error: %s",
                 e,
+                exc_info=True,
             )
             return 0.0
-
-    def _load_markets_http(self, limit: int = 500):
-        """
-        Fetch markets directly from Gamma HTTP API.
-
-        Docs: https://gamma-api.polymarket.com/markets
-        """
-        import requests
-
-        base_url = "https://gamma-api.polymarket.com/markets"
-        params = {
-            "active": "true",   # active markets only
-            "limit": str(limit),
-        }
-
-        try:
-            resp = requests.get(base_url, params=params, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-
-            if isinstance(data, list):
-                logger.info(
-                    "[POLY HTTP] Fetched %d markets via Gamma (active=true, limit=%s)",
-                    len(data),
-                    params["limit"],
-                )
-                return data
-
-            logger.warning(
-                "[POLY HTTP] Unexpected /markets JSON shape (type=%s): %s",
-                type(data),
-                str(data)[:200],
-            )
-            return []
-        except Exception:
-            logger.exception("[POLY HTTP] Error fetching markets from Gamma")
-            return []
