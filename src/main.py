@@ -40,7 +40,16 @@ def main():
 
             # Run the scanner – returns a list of ScoredOpportunity
             opps = scanner.run_scan()
-            print(f"[SCAN] Scanner returned {len(opps)} BTC opportunities")
+            opps = scanner.run_scan()
+           count = len(opps)
+            print(f"[SCAN] Scanner returned {count} BTC opportunities")
+
+          if count == 0:
+           print("[SCAN DEBUG] No opportunities this run. Check logs for:")
+            print("  - [SCAN DEBUG] Total markets loaded")
+           print("  - [SCAN DEBUG] BTC-related markets after filter")
+           print("  - [SCAN DEBUG] Strategy '<name>' produced X opportunities")
+
 
             # Limit how many we send to Discord (top N by edge)
             max_opps = 7
