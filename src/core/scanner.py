@@ -1,5 +1,5 @@
 import logging
-from typing import List, Sequence
+from typing import List
 
 from ..models import Market
 from ..parser import parse_markets
@@ -22,7 +22,7 @@ class Scanner:
         self.cfg = cfg
         self.client = client
 
-        # Register strategies here
+        # Register all strategies here
         self.strats: List[BaseStrategy] = [
             BTCIntraday(cfg, name="BTCIntraday"),
             BTCPriceTargets(cfg, name="BTCPriceTargets"),
