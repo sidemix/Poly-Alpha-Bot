@@ -1,7 +1,6 @@
 import logging
 from typing import List
 
-from ..config import Config
 from ..models import Market
 from ..parser import parse_markets
 from ..strategies.base import BaseStrategy, ScoredOpportunity
@@ -21,7 +20,8 @@ class Scanner:
     - Runs each strategy's score_many()
     """
 
-    def __init__(self, cfg: Config, client) -> None:
+    def __init__(self, cfg, client) -> None:
+        # cfg is whatever your main.py builds (no strict type needed here)
         self.cfg = cfg
         self.client = client
 
@@ -130,8 +130,7 @@ class Scanner:
         base_url = "https://gamma-api.polymarket.com/markets"
         params = {
             "active": "true",   # active markets only
-            "limit": str(limit)
-            # you *can* add "closed": "false" but docs say active=true is enough
+            "limit": str(limit),
         }
 
         try:
